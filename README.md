@@ -104,24 +104,41 @@ libgbm1 \
 libpango-1.0-0 \
 libcairo2
 ```
-### 中文字体支持（可选）
+### 字体支持（推荐）
 
-如果渲染的内容包含中文，建议安装中文字体：
+为了获得最佳渲染效果，建议安装以下字体：
 
 **Ubuntu/Debian:**
 ```bash
-# 安装常用中文字体
-apt install -y fonts-noto-cjk fonts-wqy-microhei fonts-wqy-zenhei fonts-noto-color-emoji
+# 安装 JetBrains Mono（等宽字体）、Oswald（标题字体）、
+# Noto Sans SC（思源黑体）、Noto Color Emoji（彩色表情）
+sudo apt update
+sudo apt install -y fonts-jetbrains-mono fonts-noto-cjk-extra fonts-noto-color-emoji
+
+# 下载并安装 Oswald 字体（手动安装）
+cd /tmp
+wget -q https://fonts.gstatic.com/s/oswald/v53/TK3iWkUHHAIjg752GT8G.woff2 -O Oswald-Regular.woff2
+sudo mkdir -p /usr/share/fonts/truetype/oswald
+sudo mv Oswald-Regular.woff2 /usr/share/fonts/truetype/oswald/
 
 # 刷新字体缓存
-fc-cache -fv
+sudo fc-cache -fv
 ```
 
 **CentOS/RHEL:**
 ```bash
-yum install -y google-noto-sans-cjk-fonts wqy-microhei-fonts wqy-zenhei-fonts fonts-noto-color-emoji
-fc-cache -fv
+# 安装基础字体包
+sudo yum install -y google-noto-sans-cjk-fonts fonts-noto-color-emoji
+
+# JetBrains Mono 和 Oswald 需要手动下载安装（参考上面的 Ubuntu 命令）
+sudo fc-cache -fv
 ```
+
+**字体说明：**
+- `fonts-jetbrains-mono`: JetBrains Mono - 程序代码等宽字体
+- `fonts-noto-cjk-extra`: Noto Sans SC - 思源黑体（包含简体中文）
+- `fonts-noto-color-emoji`: Noto Color Emoji - Google彩色表情字体
+- `Oswald`: 标题装饰字体（需手动安装）
 
 ### 端口被占用
 
