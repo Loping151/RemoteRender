@@ -111,7 +111,7 @@ libcairo2
 **Ubuntu/Debian:**
 ```bash
 # 安装常用中文字体
-apt install -y fonts-noto-cjk fonts-wqy-microhei fonts-wqy-zenhei
+apt install -y fonts-noto-cjk fonts-wqy-microhei fonts-wqy-zenhei fonts-noto-color-emoji
 
 # 刷新字体缓存
 fc-cache -fv
@@ -119,7 +119,7 @@ fc-cache -fv
 
 **CentOS/RHEL:**
 ```bash
-yum install -y google-noto-sans-cjk-fonts wqy-microhei-fonts wqy-zenhei-fonts
+yum install -y google-noto-sans-cjk-fonts wqy-microhei-fonts wqy-zenhei-fonts fonts-noto-color-emoji
 fc-cache -fv
 ```
 

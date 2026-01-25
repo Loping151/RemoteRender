@@ -142,13 +142,6 @@ app.post('/render', async (req, res) => {
             // 等待容器元素
             await page.waitForSelector('.container', { timeout: 10000 });
 
-            // 尝试等待网络空闲（可选，失败不影响）
-            try {
-                await page.waitForNetworkIdle({ timeout: 5000 });
-            } catch (err) {
-                console.log('[渲染服务] 网络未完全空闲，继续渲染');
-            }
-
             // 获取容器尺寸
             const container = await page.$('.container');
             const size = await page.evaluate((el) => {
