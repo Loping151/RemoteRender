@@ -40,3 +40,6 @@ pids
 
 # OS files
 Thumbs.db
+
+# Local data
+data/
