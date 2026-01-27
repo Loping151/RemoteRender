@@ -9,6 +9,7 @@
 - ✅ 浏览器实例自动管理
 - ✅ 智能队列管理
 - ✅ 健康检查接口
+- ✅ 渲染统计（本地 SQLite）
 
 ## 快速开始
 
@@ -53,6 +54,38 @@ Content-Type: application/json
 
 返回：`image/jpeg` 格式图片
 
+### 渲染统计
+
+```bash
+GET /stats
+GET /stats?date=YYYY-MM-DD
+```
+
+返回示例：
+```json
+{
+  "total": {
+    "renderCount": 100,
+    "inBytes": 123456,
+    "outBytes": 654321,
+    "totalMs": 120000,
+    "avgMs": 1200
+  },
+  "day": {
+    "day": "2026-01-27",
+    "renderCount": 10,
+    "inBytes": 12345,
+    "outBytes": 54321,
+    "totalMs": 12000,
+    "avgMs": 1200
+  }
+}
+```
+
+说明：
+- `total` 为总览统计
+- `day` 为指定日期统计（不传 `date` 默认当天）
+
 ## 配置说明
 
 在 `server.js` 中调整参数：
@@ -62,6 +95,11 @@ const MAX_CONCURRENT_RENDERS = 6;  // 最大并发数
 const MAX_BROWSER_USES = 1000;     // 浏览器重启阈值
 const BROWSER_IDLE_TTL = 3600000;  // 空闲超时（1小时）
 ```
+
+## 统计数据存储
+
+统计数据保存在本地 SQLite：`RemoteRender/data/stats.db`  
+按天分表：`stats_day_YYYYMMDD`，总览表：`stats_total`
 
 **并发数建议：**
 - 1-2GB 内存：2-3

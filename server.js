@@ -1,5 +1,8 @@
 const express = require('express');
 const puppeteer = require('puppeteer');
+const fs = require('fs');
+const path = require('path');
+const Database = require('better-sqlite3');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -7,6 +10,108 @@ const PORT = process.env.PORT || 3000;
 // 中间件
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
+
+// 统计数据库
+const DATA_DIR = path.join(__dirname, 'data');
+const DB_PATH = path.join(DATA_DIR, 'stats.db');
+
+if (!fs.existsSync(DATA_DIR)) {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+}
+
+const db = new Database(DB_PATH);
+db.pragma('journal_mode = WAL');
+
+function ensureTotalTable() {
+    db.exec(`
+        CREATE TABLE IF NOT EXISTS stats_total (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            render_count INTEGER NOT NULL DEFAULT 0,
+            in_bytes INTEGER NOT NULL DEFAULT 0,
+            out_bytes INTEGER NOT NULL DEFAULT 0,
+            total_ms INTEGER NOT NULL DEFAULT 0
+        )
+    `);
+    db.prepare('INSERT INTO stats_total (id) VALUES (1) ON CONFLICT(id) DO NOTHING').run();
+}
+
+function getLocalDateString(date = new Date()) {
+    const y = date.getFullYear();
+    const m = String(date.getMonth() + 1).padStart(2, '0');
+    const d = String(date.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+}
+
+function getDayTableName(dayStr) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dayStr)) {
+        throw new Error('Invalid date format, expected YYYY-MM-DD');
+    }
+    return `stats_day_${dayStr.replace(/-/g, '')}`;
+}
+
+function ensureDayTable(dayStr) {
+    const table = getDayTableName(dayStr);
+    db.exec(`
+        CREATE TABLE IF NOT EXISTS ${table} (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            day TEXT NOT NULL,
+            render_count INTEGER NOT NULL DEFAULT 0,
+            in_bytes INTEGER NOT NULL DEFAULT 0,
+            out_bytes INTEGER NOT NULL DEFAULT 0,
+            total_ms INTEGER NOT NULL DEFAULT 0
+        )
+    `);
+    db.prepare(`INSERT INTO ${table} (id, day) VALUES (1, ?) ON CONFLICT(id) DO NOTHING`).run(dayStr);
+    return table;
+}
+
+function addStats({ dayStr, renderCount, inBytes, outBytes, totalMs }) {
+    const table = ensureDayTable(dayStr);
+    ensureTotalTable();
+
+    const tx = db.transaction(() => {
+        db.prepare(
+            'UPDATE stats_total SET render_count = render_count + ?, in_bytes = in_bytes + ?, out_bytes = out_bytes + ?, total_ms = total_ms + ? WHERE id = 1'
+        ).run(renderCount, inBytes, outBytes, totalMs);
+
+        db.prepare(
+            `UPDATE ${table} SET render_count = render_count + ?, in_bytes = in_bytes + ?, out_bytes = out_bytes + ?, total_ms = total_ms + ? WHERE id = 1`
+        ).run(renderCount, inBytes, outBytes, totalMs);
+    });
+
+    tx();
+}
+
+function getStatsTotal() {
+    ensureTotalTable();
+    const row = db.prepare('SELECT render_count, in_bytes, out_bytes, total_ms FROM stats_total WHERE id = 1').get();
+    const renderCount = row ? row.render_count : 0;
+    const totalMs = row ? row.total_ms : 0;
+    return {
+        renderCount,
+        inBytes: row ? row.in_bytes : 0,
+        outBytes: row ? row.out_bytes : 0,
+        totalMs,
+        avgMs: renderCount > 0 ? Math.round(totalMs / renderCount) : 0
+    };
+}
+
+function getStatsDay(dayStr) {
+    const table = ensureDayTable(dayStr);
+    const row = db.prepare(`SELECT render_count, in_bytes, out_bytes, total_ms FROM ${table} WHERE id = 1`).get();
+    const renderCount = row ? row.render_count : 0;
+    const totalMs = row ? row.total_ms : 0;
+    return {
+        day: dayStr,
+        renderCount,
+        inBytes: row ? row.in_bytes : 0,
+        outBytes: row ? row.out_bytes : 0,
+        totalMs,
+        avgMs: renderCount > 0 ? Math.round(totalMs / renderCount) : 0
+    };
+}
+
+ensureTotalTable();
 
 // 浏览器实例管理
 let browser = null;
@@ -104,6 +209,27 @@ app.get('/health', (_req, res) => {
     });
 });
 
+// 统计接口
+app.get('/stats', (req, res) => {
+    try {
+        const dateParam = req.query.date;
+        const dayStr = dateParam ? String(dateParam) : getLocalDateString();
+
+        const total = getStatsTotal();
+        const day = getStatsDay(dayStr);
+
+        res.json({
+            total,
+            day
+        });
+    } catch (err) {
+        res.status(400).json({
+            error: 'Invalid request',
+            message: err.message
+        });
+    }
+});
+
 // 渲染接口
 app.post('/render', async (req, res) => {
     const startTime = Date.now();
@@ -175,6 +301,21 @@ app.post('/render', async (req, res) => {
             browserUseCount++;
 
             const duration = Date.now() - startTime;
+            const inBytes = Buffer.byteLength(html, 'utf8');
+            const outBytes = screenshot.length;
+
+            try {
+                addStats({
+                    dayStr: getLocalDateString(),
+                    renderCount: 1,
+                    inBytes,
+                    outBytes,
+                    totalMs: duration
+                });
+            } catch (err) {
+                console.error('[渲染服务] 写入统计失败:', err.message);
+            }
+
             console.log(`[渲染服务] 渲染成功，耗时: ${duration}ms, 图片大小: ${screenshot.length} bytes`);
 
             // 返回图片
