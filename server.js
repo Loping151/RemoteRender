@@ -261,7 +261,7 @@ app.post('/render', async (req, res) => {
 
             // 加载 HTML 内容
             await page.setContent(html, {
-                waitUntil: 'domcontentloaded',
+                waitUntil: 'networkidle0',
                 timeout: 30000
             });
 
@@ -283,7 +283,6 @@ app.post('/render', async (req, res) => {
                     width: Math.max(1, size.width),
                     height: Math.max(1, size.height)
                 });
-                await new Promise(resolve => setTimeout(resolve, 50));
             }
 
             // 截图
