@@ -4,7 +4,17 @@ const fs = require('fs');
 const path = require('path');
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+
+// 支持命令行参数: --port 3001 --max-renders 12
+const args = process.argv.slice(2);
+function getArg(name, envName, defaultVal) {
+    const idx = args.indexOf(`--${name}`);
+    if (idx !== -1 && args[idx + 1]) return parseInt(args[idx + 1], 10);
+    if (process.env[envName]) return parseInt(process.env[envName], 10);
+    return defaultVal;
+}
+const PORT = getArg('port', 'PORT', 3000);
+const MAX_CONCURRENT_RENDERS = getArg('max-renders', 'MAX_RENDERS', 6);
 
 // 中间件
 app.use(express.json({ limit: '50mb' }));
@@ -94,7 +104,6 @@ let browserUseCount = 0;
 let lastUsedTime = Date.now();
 const MAX_BROWSER_USES = 1000;
 const BROWSER_IDLE_TTL = 3600000;
-const MAX_CONCURRENT_RENDERS = 6;
 let activeRenders = 0;
 const renderQueue = [];
 
