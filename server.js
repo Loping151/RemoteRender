@@ -2,7 +2,6 @@ const express = require('express');
 const puppeteer = require('puppeteer');
 const fs = require('fs');
 const path = require('path');
-const Database = require('better-sqlite3');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -11,29 +10,42 @@ const PORT = process.env.PORT || 3000;
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
-// 统计数据库
+// ── 统计模块：内存计数 + 定时刷盘 ──
 const DATA_DIR = path.join(__dirname, 'data');
-const DB_PATH = path.join(DATA_DIR, 'stats.db');
+const STATS_FILE = path.join(DATA_DIR, 'stats.json');
+const FLUSH_INTERVAL = 30000; // 30秒刷盘一次
 
 if (!fs.existsSync(DATA_DIR)) {
     fs.mkdirSync(DATA_DIR, { recursive: true });
 }
 
-const db = new Database(DB_PATH);
-db.pragma('journal_mode = WAL');
-
-function ensureTotalTable() {
-    db.exec(`
-        CREATE TABLE IF NOT EXISTS stats_total (
-            id INTEGER PRIMARY KEY CHECK (id = 1),
-            render_count INTEGER NOT NULL DEFAULT 0,
-            in_bytes INTEGER NOT NULL DEFAULT 0,
-            out_bytes INTEGER NOT NULL DEFAULT 0,
-            total_ms INTEGER NOT NULL DEFAULT 0
-        )
-    `);
-    db.prepare('INSERT INTO stats_total (id) VALUES (1) ON CONFLICT(id) DO NOTHING').run();
+// 从磁盘加载已有统计
+function loadStats() {
+    try {
+        if (fs.existsSync(STATS_FILE)) {
+            return JSON.parse(fs.readFileSync(STATS_FILE, 'utf8'));
+        }
+    } catch (err) {
+        console.error('[渲染服务] 加载统计文件失败:', err.message);
+    }
+    return { total: { renderCount: 0, inBytes: 0, outBytes: 0, totalMs: 0 }, days: {} };
 }
+
+const stats = loadStats();
+let statsDirty = false;
+
+function flushStats() {
+    if (!statsDirty) return;
+    try {
+        fs.writeFileSync(STATS_FILE, JSON.stringify(stats), 'utf8');
+        statsDirty = false;
+    } catch (err) {
+        console.error('[渲染服务] 写入统计文件失败:', err.message);
+    }
+}
+
+// 定时刷盘
+setInterval(flushStats, FLUSH_INTERVAL);
 
 function getLocalDateString(date = new Date()) {
     const y = date.getFullYear();
@@ -42,99 +54,63 @@ function getLocalDateString(date = new Date()) {
     return `${y}-${m}-${d}`;
 }
 
-function getDayTableName(dayStr) {
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(dayStr)) {
-        throw new Error('Invalid date format, expected YYYY-MM-DD');
-    }
-    return `stats_day_${dayStr.replace(/-/g, '')}`;
-}
-
-function ensureDayTable(dayStr) {
-    const table = getDayTableName(dayStr);
-    db.exec(`
-        CREATE TABLE IF NOT EXISTS ${table} (
-            id INTEGER PRIMARY KEY CHECK (id = 1),
-            day TEXT NOT NULL,
-            render_count INTEGER NOT NULL DEFAULT 0,
-            in_bytes INTEGER NOT NULL DEFAULT 0,
-            out_bytes INTEGER NOT NULL DEFAULT 0,
-            total_ms INTEGER NOT NULL DEFAULT 0
-        )
-    `);
-    db.prepare(`INSERT INTO ${table} (id, day) VALUES (1, ?) ON CONFLICT(id) DO NOTHING`).run(dayStr);
-    return table;
-}
-
 function addStats({ dayStr, renderCount, inBytes, outBytes, totalMs }) {
-    const table = ensureDayTable(dayStr);
-    ensureTotalTable();
+    stats.total.renderCount += renderCount;
+    stats.total.inBytes += inBytes;
+    stats.total.outBytes += outBytes;
+    stats.total.totalMs += totalMs;
 
-    const tx = db.transaction(() => {
-        db.prepare(
-            'UPDATE stats_total SET render_count = render_count + ?, in_bytes = in_bytes + ?, out_bytes = out_bytes + ?, total_ms = total_ms + ? WHERE id = 1'
-        ).run(renderCount, inBytes, outBytes, totalMs);
+    if (!stats.days[dayStr]) {
+        stats.days[dayStr] = { renderCount: 0, inBytes: 0, outBytes: 0, totalMs: 0 };
+    }
+    stats.days[dayStr].renderCount += renderCount;
+    stats.days[dayStr].inBytes += inBytes;
+    stats.days[dayStr].outBytes += outBytes;
+    stats.days[dayStr].totalMs += totalMs;
 
-        db.prepare(
-            `UPDATE ${table} SET render_count = render_count + ?, in_bytes = in_bytes + ?, out_bytes = out_bytes + ?, total_ms = total_ms + ? WHERE id = 1`
-        ).run(renderCount, inBytes, outBytes, totalMs);
-    });
-
-    tx();
+    statsDirty = true;
 }
 
 function getStatsTotal() {
-    ensureTotalTable();
-    const row = db.prepare('SELECT render_count, in_bytes, out_bytes, total_ms FROM stats_total WHERE id = 1').get();
-    const renderCount = row ? row.render_count : 0;
-    const totalMs = row ? row.total_ms : 0;
+    const t = stats.total;
     return {
-        renderCount,
-        inBytes: row ? row.in_bytes : 0,
-        outBytes: row ? row.out_bytes : 0,
-        totalMs,
-        avgMs: renderCount > 0 ? Math.round(totalMs / renderCount) : 0
+        ...t,
+        avgMs: t.renderCount > 0 ? Math.round(t.totalMs / t.renderCount) : 0
     };
 }
 
 function getStatsDay(dayStr) {
-    const table = ensureDayTable(dayStr);
-    const row = db.prepare(`SELECT render_count, in_bytes, out_bytes, total_ms FROM ${table} WHERE id = 1`).get();
-    const renderCount = row ? row.render_count : 0;
-    const totalMs = row ? row.total_ms : 0;
+    const d = stats.days[dayStr] || { renderCount: 0, inBytes: 0, outBytes: 0, totalMs: 0 };
     return {
         day: dayStr,
-        renderCount,
-        inBytes: row ? row.in_bytes : 0,
-        outBytes: row ? row.out_bytes : 0,
-        totalMs,
-        avgMs: renderCount > 0 ? Math.round(totalMs / renderCount) : 0
+        ...d,
+        avgMs: d.renderCount > 0 ? Math.round(d.totalMs / d.renderCount) : 0
     };
 }
 
-ensureTotalTable();
-
-// 浏览器实例管理
+// ── 浏览器实例管理 ──
 let browser = null;
 let browserUseCount = 0;
 let lastUsedTime = Date.now();
-const MAX_BROWSER_USES = 1000; // 最大使用次数
-const BROWSER_IDLE_TTL = 3600000; // 空闲超时时间 1小时（毫秒）
-const MAX_CONCURRENT_RENDERS = 6; // 最大并发渲染数
-let activeRenders = 0; // 当前活动渲染数
-const renderQueue = []; // 渲染队列
+const MAX_BROWSER_USES = 1000;
+const BROWSER_IDLE_TTL = 3600000;
+const MAX_CONCURRENT_RENDERS = 6;
+let activeRenders = 0;
+const renderQueue = [];
 
-// 获取或创建浏览器实例
+// 页面池：复用 page 避免每次创建 context + page 的开销
+const pagePool = [];
+let poolContext = null;
+
 async function ensureBrowser() {
     const now = Date.now();
 
-    // 检查是否需要重启浏览器
     const needRestart =
         !browser ||
         browserUseCount >= MAX_BROWSER_USES ||
         (lastUsedTime > 0 && now - lastUsedTime > BROWSER_IDLE_TTL);
 
     if (needRestart && browser) {
-        // 如果有活动渲染，不重启
         if (activeRenders > 0) {
             lastUsedTime = now;
             return browser;
@@ -148,6 +124,9 @@ async function ensureBrowser() {
         }
         browser = null;
         browserUseCount = 0;
+        // 清空页面池
+        pagePool.length = 0;
+        poolContext = null;
     }
 
     if (!browser) {
@@ -171,29 +150,43 @@ async function ensureBrowser() {
     return browser;
 }
 
-// 并发控制：等待可用的渲染槽位
+// 并发控制
 async function acquireRenderSlot() {
     if (activeRenders < MAX_CONCURRENT_RENDERS) {
         activeRenders++;
         return Promise.resolve();
     }
-
-    // 如果已达到最大并发，加入队列等待
     return new Promise((resolve) => {
         renderQueue.push(resolve);
     });
 }
 
-// 释放渲染槽位
 function releaseRenderSlot() {
     activeRenders--;
-
-    // 如果队列中有等待的请求，唤醒一个
     if (renderQueue.length > 0) {
         const resolve = renderQueue.shift();
         activeRenders++;
         resolve();
     }
+}
+
+// 页面池
+async function acquirePage() {
+    const b = await ensureBrowser();
+    if (pagePool.length > 0) {
+        return pagePool.pop();
+    }
+    if (!poolContext) {
+        poolContext = await b.createBrowserContext();
+    }
+    const page = await poolContext.newPage();
+    await page.setViewport({ width: 1200, height: 1000 });
+    return page;
+}
+
+function releasePage(page) {
+    browserUseCount++;
+    pagePool.push(page);
 }
 
 // 健康检查接口
@@ -214,19 +207,9 @@ app.get('/stats', (req, res) => {
     try {
         const dateParam = req.query.date;
         const dayStr = dateParam ? String(dateParam) : getLocalDateString();
-
-        const total = getStatsTotal();
-        const day = getStatsDay(dayStr);
-
-        res.json({
-            total,
-            day
-        });
+        res.json({ total: getStatsTotal(), day: getStatsDay(dayStr) });
     } catch (err) {
-        res.status(400).json({
-            error: 'Invalid request',
-            message: err.message
-        });
+        res.status(400).json({ error: 'Invalid request', message: err.message });
     }
 });
 
@@ -234,7 +217,6 @@ app.get('/stats', (req, res) => {
 app.post('/render', async (req, res) => {
     const startTime = Date.now();
     let page = null;
-    let context = null;
 
     try {
         const { html } = req.body;
@@ -245,30 +227,18 @@ app.post('/render', async (req, res) => {
 
         console.log(`[渲染服务] 收到渲染请求，HTML大小: ${html.length} bytes，当前并发: ${activeRenders}/${MAX_CONCURRENT_RENDERS}`);
 
-        // 等待可用的渲染槽位
         await acquireRenderSlot();
 
         try {
-            // 获取浏览器实例
-            const browserInstance = await ensureBrowser();
+            page = await acquirePage();
 
-            // 创建独立的浏览器上下文（支持并发）
-            context = await browserInstance.createBrowserContext();
-
-            // 创建新页面
-            page = await context.newPage();
-            await page.setViewport({ width: 1200, height: 1000 });
-
-            // 加载 HTML 内容
             await page.setContent(html, {
-                waitUntil: 'networkidle0',
+                waitUntil: 'load',
                 timeout: 30000
             });
 
-            // 等待容器元素
             await page.waitForSelector('.container', { timeout: 10000 });
 
-            // 获取容器尺寸
             const container = await page.$('.container');
             const size = await page.evaluate((el) => {
                 const rect = el.getBoundingClientRect();
@@ -277,7 +247,6 @@ app.post('/render', async (req, res) => {
                 return { width, height };
             }, container);
 
-            // 设置视口大小
             if (size && size.width && size.height) {
                 await page.setViewport({
                     width: Math.max(1, size.width),
@@ -285,63 +254,41 @@ app.post('/render', async (req, res) => {
                 });
             }
 
-            // 截图
             const screenshot = await container.screenshot({
                 type: 'jpeg',
                 quality: 90
             });
 
-            // 关闭浏览器上下文（会自动关闭其中的所有页面）
-            await context.close();
-            context = null;
+            releasePage(page);
             page = null;
-
-            // 增加使用计数
-            browserUseCount++;
 
             const duration = Date.now() - startTime;
             const inBytes = Buffer.byteLength(html, 'utf8');
             const outBytes = screenshot.length;
 
-            try {
-                addStats({
-                    dayStr: getLocalDateString(),
-                    renderCount: 1,
-                    inBytes,
-                    outBytes,
-                    totalMs: duration
-                });
-            } catch (err) {
-                console.error('[渲染服务] 写入统计失败:', err.message);
-            }
+            addStats({
+                dayStr: getLocalDateString(),
+                renderCount: 1,
+                inBytes,
+                outBytes,
+                totalMs: duration
+            });
 
             console.log(`[渲染服务] 渲染成功，耗时: ${duration}ms, 图片大小: ${screenshot.length} bytes`);
 
-            // 返回图片
             res.set('Content-Type', 'image/jpeg');
             res.send(screenshot);
 
         } finally {
-            // 释放渲染槽位
             releaseRenderSlot();
         }
 
     } catch (error) {
         console.error('[渲染服务] 渲染失败:', error.message);
 
-        // 清理资源
-        if (context) {
-            try {
-                await context.close();
-            } catch (err) {
-                console.error('[渲染服务] 关闭浏览器上下文失败:', err.message);
-            }
-        } else if (page) {
-            try {
-                await page.close();
-            } catch (err) {
-                console.error('[渲染服务] 关闭页面失败:', err.message);
-            }
+        // 渲染失败的 page 不放回池，直接丢弃
+        if (page) {
+            try { await page.close(); } catch (err) {}
         }
 
         res.status(500).json({
@@ -364,7 +311,7 @@ setInterval(async () => {
             console.error('[渲染服务] 关闭浏览器失败:', err.message);
         }
     }
-}, 300000); // 每5分钟检查一次
+}, 300000);
 
 // 启动服务器
 app.listen(PORT, () => {
@@ -373,19 +320,15 @@ app.listen(PORT, () => {
     console.log(`[渲染服务] 渲染接口: http://localhost:${PORT}/render`);
 });
 
-// 优雅关闭
-process.on('SIGINT', async () => {
+// 优雅关闭：刷盘后退出
+async function shutdown() {
     console.log('\n[渲染服务] 正在关闭服务...');
+    flushStats();
     if (browser) {
         await browser.close();
     }
     process.exit(0);
-});
+}
 
-process.on('SIGTERM', async () => {
-    console.log('\n[渲染服务] 正在关闭服务...');
-    if (browser) {
-        await browser.close();
-    }
-    process.exit(0);
-});
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);
