@@ -15,6 +15,7 @@ function getArg(name, envName, defaultVal) {
 }
 const PORT = getArg('port', 'PORT', 3000);
 const MAX_CONCURRENT_RENDERS = getArg('max-renders', 'MAX_RENDERS', 6);
+const SCREENSHOT_QUALITY = getArg('quality', 'SCREENSHOT_QUALITY', 80);
 
 // 中间件
 app.use(express.json({ limit: '50mb' }));
@@ -278,7 +279,7 @@ app.post('/render', async (req, res) => {
 
             const screenshot = await container.screenshot({
                 type: 'jpeg',
-                quality: 90
+                quality: SCREENSHOT_QUALITY
             });
 
             releasePage(page);
@@ -337,7 +338,7 @@ setInterval(async () => {
 
 // 启动服务器
 app.listen(PORT, () => {
-    console.log(`[渲染服务] 服务已启动，监听端口: ${PORT}`);
+    console.log(`[渲染服务] 服务已启动，监听端口: ${PORT}，截图质量: ${SCREENSHOT_QUALITY}`);
     console.log(`[渲染服务] 健康检查: http://localhost:${PORT}/health`);
     console.log(`[渲染服务] 渲染接口: http://localhost:${PORT}/render`);
 });

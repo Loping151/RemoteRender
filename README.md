@@ -88,10 +88,26 @@ GET /stats?date=YYYY-MM-DD
 
 ## 配置说明
 
-在 `server.js` 中调整参数：
+支持命令行参数和环境变量两种方式配置：
+
+| 参数 | 命令行 | 环境变量 | 默认值 | 说明 |
+|------|--------|----------|--------|------|
+| 端口 | `--port` | `PORT` | 3000 | 服务监听端口 |
+| 最大并发数 | `--max-renders` | `MAX_RENDERS` | 6 | 同时处理的最大渲染请求数 |
+| 截图质量 | `--quality` | `SCREENSHOT_QUALITY` | 80 | JPEG 截图质量 (1-100) |
+
+示例：
+```bash
+# 命令行参数
+node server.js --port 3001 --max-renders 4 --quality 80
+
+# 环境变量
+PORT=3001 MAX_RENDERS=4 SCREENSHOT_QUALITY=80 node server.js
+```
+
+其他内部参数（在 `server.js` 中调整）：
 
 ```javascript
-const MAX_CONCURRENT_RENDERS = 6;  // 最大并发数
 const MAX_BROWSER_USES = 1000;     // 浏览器重启阈值
 const BROWSER_IDLE_TTL = 3600000;  // 空闲超时（1小时）
 ```
