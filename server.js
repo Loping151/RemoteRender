@@ -102,6 +102,8 @@ const renderQueue = [];
 const pagePool = [];
 let poolContext = null;
 
+let _browserLaunching = null; // 防止并发启动多个浏览器
+
 async function ensureBrowser() {
     const now = Date.now();
 
@@ -124,25 +126,30 @@ async function ensureBrowser() {
         }
         browser = null;
         browserUseCount = 0;
-        // 清空页面池
         pagePool.length = 0;
         poolContext = null;
+        _contextCreating = null;
+        _browserLaunching = null;
     }
 
     if (!browser) {
-        console.log('[渲染服务] 正在启动新浏览器实例...');
-        browser = await puppeteer.launch({
-            headless: 'new',
-            args: [
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-accelerated-2d-canvas',
-                '--no-first-run',
-                '--no-zygote',
-                '--disable-gpu'
-            ]
-        });
+        if (!_browserLaunching) {
+            console.log('[渲染服务] 正在启动新浏览器实例...');
+            _browserLaunching = puppeteer.launch({
+                headless: 'new',
+                args: [
+                    '--no-sandbox',
+                    '--disable-setuid-sandbox',
+                    '--disable-dev-shm-usage',
+                    '--disable-accelerated-2d-canvas',
+                    '--no-first-run',
+                    '--no-zygote',
+                    '--disable-gpu'
+                ]
+            });
+        }
+        browser = await _browserLaunching;
+        _browserLaunching = null;
         console.log('[渲染服务] 浏览器启动成功');
     }
 
@@ -171,13 +178,19 @@ function releaseRenderSlot() {
 }
 
 // 页面池
+let _contextCreating = null; // 防止并发创建多个 context
+
 async function acquirePage() {
     const b = await ensureBrowser();
     if (pagePool.length > 0) {
         return pagePool.pop();
     }
     if (!poolContext) {
-        poolContext = await b.createBrowserContext();
+        if (!_contextCreating) {
+            _contextCreating = b.createBrowserContext();
+        }
+        poolContext = await _contextCreating;
+        _contextCreating = null;
     }
     const page = await poolContext.newPage();
     await page.setViewport({ width: 1200, height: 1000 });
