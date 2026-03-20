@@ -314,6 +314,16 @@ app.post('/render', async (req, res) => {
             try { await page.close(); } catch (err) {}
         }
 
+        // 检测浏览器是否已死，如果是则强制重置避免后续请求全部失败
+        if (browser) {
+            try {
+                // 尝试一个轻量操作来探测浏览器是否存活
+                await browser.version();
+            } catch (probeErr) {
+                await forceResetBrowser(`浏览器已崩溃: ${probeErr.message}`);
+            }
+        }
+
         res.status(500).json({
             error: 'Render failed',
             message: error.message
@@ -321,18 +331,26 @@ app.post('/render', async (req, res) => {
     }
 });
 
+// 强制重置浏览器状态（关闭并清空所有池）
+async function forceResetBrowser(reason) {
+    console.log(`[渲染服务] 强制重置浏览器: ${reason}`);
+    const old = browser;
+    browser = null;
+    browserUseCount = 0;
+    pagePool.length = 0;
+    poolContext = null;
+    _contextCreating = null;
+    _browserLaunching = null;
+    if (old) {
+        try { await old.close(); } catch (err) {}
+    }
+}
+
 // 定期清理空闲浏览器
 setInterval(async () => {
-    if (browser && Date.now() - lastUsedTime > BROWSER_IDLE_TTL) {
-        console.log('[渲染服务] 检测到浏览器空闲超时，正在关闭...');
-        try {
-            await browser.close();
-            browser = null;
-            browserUseCount = 0;
-            console.log('[渲染服务] 浏览器已关闭');
-        } catch (err) {
-            console.error('[渲染服务] 关闭浏览器失败:', err.message);
-        }
+    if (browser && activeRenders === 0 && Date.now() - lastUsedTime > BROWSER_IDLE_TTL) {
+        await forceResetBrowser('空闲超时');
+        console.log('[渲染服务] 浏览器已关闭');
     }
 }, 300000);
 
