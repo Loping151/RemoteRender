@@ -26,6 +26,15 @@ function fmtSize(bytes) {
 // 中间件
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
+// 静默处理客户端中途断开连接
+app.use((err, _req, res, _next) => {
+    if (err.type === 'request.aborted') {
+        console.log('[渲染服务] 客户端中途断开连接，忽略');
+        return res.end();
+    }
+    console.error('[渲染服务] 中间件异常:', err.message);
+    res.status(400).json({ error: err.message });
+});
 
 // ── 统计模块：内存计数 + 定时刷盘 ──
 const DATA_DIR = path.join(__dirname, 'data');
