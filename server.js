@@ -17,6 +17,12 @@ const PORT = getArg('port', 'PORT', 3000);
 const MAX_CONCURRENT_RENDERS = getArg('max-renders', 'MAX_RENDERS', 6);
 const SCREENSHOT_QUALITY = getArg('quality', 'SCREENSHOT_QUALITY', 80);
 
+function fmtSize(bytes) {
+    if (bytes >= 1048576) return (bytes / 1048576).toFixed(1) + ' MB';
+    if (bytes >= 1024) return (bytes / 1024).toFixed(1) + ' KB';
+    return bytes + ' B';
+}
+
 // 中间件
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
@@ -248,7 +254,7 @@ app.post('/render', async (req, res) => {
             return res.status(400).json({ error: 'HTML content is required' });
         }
 
-        console.log(`[渲染服务] 收到渲染请求，HTML大小: ${html.length} bytes，当前并发: ${activeRenders}/${MAX_CONCURRENT_RENDERS}`);
+        console.log(`[渲染服务] 收到渲染请求，HTML大小: ${fmtSize(html.length)}，当前并发: ${activeRenders}/${MAX_CONCURRENT_RENDERS}`);
 
         await acquireRenderSlot();
 
@@ -297,7 +303,7 @@ app.post('/render', async (req, res) => {
                 totalMs: duration
             });
 
-            console.log(`[渲染服务] 渲染成功，耗时: ${duration}ms, 图片大小: ${screenshot.length} bytes`);
+            console.log(`[渲染服务] 渲染成功，耗时: ${duration}ms, 图片大小: ${fmtSize(screenshot.length)}`);
 
             res.set('Content-Type', 'image/jpeg');
             res.send(screenshot);
