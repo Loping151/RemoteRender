@@ -263,7 +263,10 @@ app.post('/render', async (req, res) => {
             return res.status(400).json({ error: 'HTML content is required' });
         }
 
-        console.log(`[渲染服务] 收到渲染请求，HTML大小: ${fmtSize(html.length)}，当前并发: ${activeRenders}/${MAX_CONCURRENT_RENDERS}`);
+        const titleMatch = html.match(/<title[^>]*>([^<]*)<\/title>/i);
+        const title = titleMatch ? titleMatch[1].trim() : '';
+        const titleTag = title ? ` [${title}]` : '';
+        console.log(`[渲染服务]${titleTag} 收到渲染请求，HTML大小: ${fmtSize(html.length)}，当前并发: ${activeRenders}/${MAX_CONCURRENT_RENDERS}`);
 
         await acquireRenderSlot();
 
@@ -312,7 +315,7 @@ app.post('/render', async (req, res) => {
                 totalMs: duration
             });
 
-            console.log(`[渲染服务] 渲染成功，耗时: ${duration}ms, 图片大小: ${fmtSize(screenshot.length)}`);
+            console.log(`[渲染服务]${titleTag} 渲染成功，耗时: ${duration}ms, 图片大小: ${fmtSize(screenshot.length)}`);
 
             res.set('Content-Type', 'image/jpeg');
             res.send(screenshot);
