@@ -2,6 +2,39 @@ const express = require('express');
 const puppeteer = require('puppeteer');
 const fs = require('fs');
 const path = require('path');
+const { execSync } = require('child_process');
+
+// ── 启动时清理上次遗留的孤儿 Chrome 进程和 profile 目录 ──
+(function cleanupOrphans() {
+    try {
+        // 1) 找出所有正在运行的 puppeteer Chrome 主进程使用的 profile 目录
+        const psOut = execSync(
+            "ps aux | grep 'puppeteer_dev_chrome_profile' | grep -v grep || true",
+            { encoding: 'utf8' }
+        );
+        const liveProfiles = new Set();
+        for (const line of psOut.split('\n')) {
+            const m = line.match(/user-data-dir=(\/tmp\/puppeteer_dev_chrome_profile-[^\s]+)/);
+            if (m) liveProfiles.add(m[1]);
+        }
+
+        // 2) 扫描 /tmp 里所有 puppeteer profile 目录，删除不属于任何活跃进程的
+        const tmpFiles = fs.readdirSync('/tmp').filter(f => f.startsWith('puppeteer_dev_chrome_profile-'));
+        let cleaned = 0;
+        for (const f of tmpFiles) {
+            const fullPath = '/tmp/' + f;
+            if (!liveProfiles.has(fullPath)) {
+                fs.rmSync(fullPath, { recursive: true, force: true });
+                cleaned++;
+            }
+        }
+        if (cleaned > 0) {
+            console.log(`[渲染服务] 启动清理: 删除了 ${cleaned} 个孤儿 profile 目录`);
+        }
+    } catch (err) {
+        console.error('[渲染服务] 启动清理失败(可忽略):', err.message);
+    }
+})();
 
 const app = express();
 
@@ -379,12 +412,20 @@ app.listen(PORT, () => {
     console.log(`[渲染服务] 渲染接口: http://localhost:${PORT}/render`);
 });
 
-// 优雅关闭：刷盘后退出
+// 优雅关闭：刷盘后退出（给 browser.close 加超时，防止 pm2 等不及直接 SIGKILL）
 async function shutdown() {
     console.log('\n[渲染服务] 正在关闭服务...');
     flushStats();
     if (browser) {
-        await browser.close();
+        try {
+            await Promise.race([
+                browser.close(),
+                new Promise((_, reject) => setTimeout(() => reject(new Error('close timeout')), 3000))
+            ]);
+        } catch (err) {
+            console.error('[渲染服务] 关闭浏览器超时或失败:', err.message);
+            try { browser.process()?.kill('SIGKILL'); } catch (_) {}
+        }
     }
     process.exit(0);
 }
