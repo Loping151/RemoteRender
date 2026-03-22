@@ -7,7 +7,6 @@ const { execSync } = require('child_process');
 // ── 启动时清理上次遗留的孤儿 Chrome 进程和 profile 目录 ──
 (function cleanupOrphans() {
     try {
-        // 1) 找出所有正在运行的 puppeteer Chrome 主进程使用的 profile 目录
         const psOut = execSync(
             "ps aux | grep 'puppeteer_dev_chrome_profile' | grep -v grep || true",
             { encoding: 'utf8' }
@@ -18,7 +17,6 @@ const { execSync } = require('child_process');
             if (m) liveProfiles.add(m[1]);
         }
 
-        // 2) 扫描 /tmp 里所有 puppeteer profile 目录，删除不属于任何活跃进程的
         const tmpFiles = fs.readdirSync('/tmp').filter(f => f.startsWith('puppeteer_dev_chrome_profile-'));
         let cleaned = 0;
         for (const f of tmpFiles) {
@@ -38,7 +36,6 @@ const { execSync } = require('child_process');
 
 const app = express();
 
-// 支持命令行参数: --port 3001 --max-renders 12
 const args = process.argv.slice(2);
 function getArg(name, envName, defaultVal) {
     const idx = args.indexOf(`--${name}`);
@@ -59,7 +56,6 @@ function fmtSize(bytes) {
 // 中间件
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
-// 静默处理客户端中途断开连接
 app.use((err, _req, res, _next) => {
     if (err.type === 'request.aborted') {
         console.log('[渲染服务] 客户端中途断开连接，忽略');
@@ -69,16 +65,14 @@ app.use((err, _req, res, _next) => {
     res.status(400).json({ error: err.message });
 });
 
-// ── 统计模块：内存计数 + 定时刷盘 ──
+// ── 统计模块 ──
 const DATA_DIR = path.join(__dirname, 'data');
 const STATS_FILE = path.join(DATA_DIR, 'stats.json');
-const FLUSH_INTERVAL = 30000; // 30秒刷盘一次
 
 if (!fs.existsSync(DATA_DIR)) {
     fs.mkdirSync(DATA_DIR, { recursive: true });
 }
 
-// 从磁盘加载已有统计
 function loadStats() {
     try {
         if (fs.existsSync(STATS_FILE)) {
@@ -103,8 +97,7 @@ function flushStats() {
     }
 }
 
-// 定时刷盘
-setInterval(flushStats, FLUSH_INTERVAL);
+setInterval(flushStats, 30000);
 
 function getLocalDateString(date = new Date()) {
     const y = date.getFullYear();
@@ -132,22 +125,15 @@ function addStats({ dayStr, renderCount, inBytes, outBytes, totalMs }) {
 
 function getStatsTotal() {
     const t = stats.total;
-    return {
-        ...t,
-        avgMs: t.renderCount > 0 ? Math.round(t.totalMs / t.renderCount) : 0
-    };
+    return { ...t, avgMs: t.renderCount > 0 ? Math.round(t.totalMs / t.renderCount) : 0 };
 }
 
 function getStatsDay(dayStr) {
     const d = stats.days[dayStr] || { renderCount: 0, inBytes: 0, outBytes: 0, totalMs: 0 };
-    return {
-        day: dayStr,
-        ...d,
-        avgMs: d.renderCount > 0 ? Math.round(d.totalMs / d.renderCount) : 0
-    };
+    return { day: dayStr, ...d, avgMs: d.renderCount > 0 ? Math.round(d.totalMs / d.renderCount) : 0 };
 }
 
-// ── 浏览器实例管理 ──
+// ── 浏览器实例管理（单实例 + 多独立 context） ──
 let browser = null;
 let browserUseCount = 0;
 let lastUsedTime = Date.now();
@@ -155,12 +141,7 @@ const MAX_BROWSER_USES = 1000;
 const BROWSER_IDLE_TTL = 3600000;
 let activeRenders = 0;
 const renderQueue = [];
-
-// 页面池：复用 page 避免每次创建 context + page 的开销
-const pagePool = [];
-let poolContext = null;
-
-let _browserLaunching = null; // 防止并发启动多个浏览器
+let _browserLaunching = null;
 
 async function ensureBrowser() {
     const now = Date.now();
@@ -184,9 +165,6 @@ async function ensureBrowser() {
         }
         browser = null;
         browserUseCount = 0;
-        pagePool.length = 0;
-        poolContext = null;
-        _contextCreating = null;
         _browserLaunching = null;
     }
 
@@ -202,7 +180,9 @@ async function ensureBrowser() {
                     '--disable-accelerated-2d-canvas',
                     '--no-first-run',
                     '--no-zygote',
-                    '--disable-gpu'
+                    '--disable-gpu',
+                    '--disable-backgrounding-occluded-windows',
+                    '--disable-renderer-backgrounding'
                 ]
             });
         }
@@ -215,7 +195,6 @@ async function ensureBrowser() {
     return browser;
 }
 
-// 并发控制
 async function acquireRenderSlot() {
     if (activeRenders < MAX_CONCURRENT_RENDERS) {
         activeRenders++;
@@ -235,32 +214,32 @@ function releaseRenderSlot() {
     }
 }
 
-// 页面池
-let _contextCreating = null; // 防止并发创建多个 context
+// 每次渲染创建独立 context，渲染完毕后关闭
+let _pageIdCounter = 0;
 
 async function acquirePage() {
     const b = await ensureBrowser();
-    if (pagePool.length > 0) {
-        return pagePool.pop();
-    }
-    if (!poolContext) {
-        if (!_contextCreating) {
-            _contextCreating = b.createBrowserContext();
-        }
-        poolContext = await _contextCreating;
-        _contextCreating = null;
-    }
-    const page = await poolContext.newPage();
+    const ctx = await b.createBrowserContext();
+    const pageId = ++_pageIdCounter;
+    const page = await ctx.newPage();
     await page.setViewport({ width: 1200, height: 1000 });
+    page._renderContext = ctx;
+    page._pageId = pageId;
+    page._createTime = Date.now();
     return page;
 }
 
-function releasePage(page) {
+async function releasePage(page) {
     browserUseCount++;
-    pagePool.push(page);
+    if (page._renderContext) {
+        try {
+            await page._renderContext.close();
+        } catch (err) {}
+        page._renderContext = null;
+    }
 }
 
-// 健康检查接口
+// 健康检查
 app.get('/health', (_req, res) => {
     res.json({
         status: 'ok',
@@ -296,12 +275,10 @@ app.post('/render', async (req, res) => {
             return res.status(400).json({ error: 'HTML content is required' });
         }
 
-        const titleMatch = html.match(/<title[^>]*>([^<]*)<\/title>/i);
-        const title = titleMatch ? titleMatch[1].trim() : '';
-        const titleTag = title ? ` [${title}]` : '';
-        console.log(`[渲染服务]${titleTag} 收到渲染请求，HTML大小: ${fmtSize(html.length)}，当前并发: ${activeRenders}/${MAX_CONCURRENT_RENDERS}`);
+        console.log(`[渲染服务] 收到渲染请求，HTML大小: ${fmtSize(html.length)}，当前并发: ${activeRenders}/${MAX_CONCURRENT_RENDERS}`);
 
         await acquireRenderSlot();
+        const renderStartTime = Date.now();
 
         try {
             page = await acquirePage();
@@ -333,10 +310,7 @@ app.post('/render', async (req, res) => {
                 quality: SCREENSHOT_QUALITY
             });
 
-            releasePage(page);
-            page = null;
-
-            const duration = Date.now() - startTime;
+            const duration = Date.now() - renderStartTime;
             const inBytes = Buffer.byteLength(html, 'utf8');
             const outBytes = screenshot.length;
 
@@ -348,27 +322,30 @@ app.post('/render', async (req, res) => {
                 totalMs: duration
             });
 
-            console.log(`[渲染服务]${titleTag} 渲染成功，耗时: ${duration}ms, 图片大小: ${fmtSize(screenshot.length)}`);
+            await releasePage(page);
+            page = null;
+
+            console.log(`[渲染服务] 渲染成功，耗时: ${duration}ms，图片大小: ${fmtSize(outBytes)}`);
 
             res.set('Content-Type', 'image/jpeg');
             res.send(screenshot);
 
+        } catch (err) {
+            console.error('[渲染服务] 渲染失败:', err.message);
+            throw err;
         } finally {
-            releaseRenderSlot();
+            if (page) {
+                try { await releasePage(page); } catch (e) {}
+                page = null;
+            }
+            try { releaseRenderSlot(); } catch (e) {}
         }
 
     } catch (error) {
         console.error('[渲染服务] 渲染失败:', error.message);
 
-        // 渲染失败的 page 不放回池，直接丢弃
-        if (page) {
-            try { await page.close(); } catch (err) {}
-        }
-
-        // 检测浏览器是否已死，如果是则强制重置避免后续请求全部失败
         if (browser) {
             try {
-                // 尝试一个轻量操作来探测浏览器是否存活
                 await browser.version();
             } catch (probeErr) {
                 await forceResetBrowser(`浏览器已崩溃: ${probeErr.message}`);
@@ -382,15 +359,11 @@ app.post('/render', async (req, res) => {
     }
 });
 
-// 强制重置浏览器状态（关闭并清空所有池）
 async function forceResetBrowser(reason) {
     console.log(`[渲染服务] 强制重置浏览器: ${reason}`);
     const old = browser;
     browser = null;
     browserUseCount = 0;
-    pagePool.length = 0;
-    poolContext = null;
-    _contextCreating = null;
     _browserLaunching = null;
     if (old) {
         try { await old.close(); } catch (err) {}
@@ -412,7 +385,7 @@ app.listen(PORT, () => {
     console.log(`[渲染服务] 渲染接口: http://localhost:${PORT}/render`);
 });
 
-// 优雅关闭：刷盘后退出（给 browser.close 加超时，防止 pm2 等不及直接 SIGKILL）
+// 优雅关闭
 async function shutdown() {
     console.log('\n[渲染服务] 正在关闭服务...');
     flushStats();
