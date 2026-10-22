@@ -15,11 +15,11 @@ echo ""
 # 检查 Node.js 是否安装
 if ! command -v node &> /dev/null; then
     echo "❌ 错误: 未检测到 Node.js"
-    echo "请先安装 Node.js (>= 16.0.0)"
+    echo "请先安装 Node.js (24.22.1 或受支持的已修补版本)"
     echo ""
     echo "安装方法："
-    echo "  Ubuntu/Debian: curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash - && sudo apt-get install -y nodejs"
-    echo "  CentOS/RHEL:   curl -fsSL https://rpm.nodesource.com/setup_20.x | sudo bash - && sudo yum install -y nodejs"
+    echo "  Ubuntu/Debian: curl -fsSL https://deb.nodesource.com/setup_24.x | sudo -E bash - && sudo apt-get install -y nodejs"
+    echo "  CentOS/RHEL:   curl -fsSL https://rpm.nodesource.com/setup_24.x | sudo bash - && sudo yum install -y nodejs"
     exit 1
 fi
 

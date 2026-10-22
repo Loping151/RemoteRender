@@ -2,37 +2,7 @@ const express = require('express');
 const puppeteer = require('puppeteer');
 const fs = require('fs');
 const path = require('path');
-const { execSync } = require('child_process');
-
-// ── 启动时清理上次遗留的孤儿 Chrome 进程和 profile 目录 ──
-(function cleanupOrphans() {
-    try {
-        const psOut = execSync(
-            "ps aux | grep 'puppeteer_dev_chrome_profile' | grep -v grep || true",
-            { encoding: 'utf8' }
-        );
-        const liveProfiles = new Set();
-        for (const line of psOut.split('\n')) {
-            const m = line.match(/user-data-dir=(\/tmp\/puppeteer_dev_chrome_profile-[^\s]+)/);
-            if (m) liveProfiles.add(m[1]);
-        }
-
-        const tmpFiles = fs.readdirSync('/tmp').filter(f => f.startsWith('puppeteer_dev_chrome_profile-'));
-        let cleaned = 0;
-        for (const f of tmpFiles) {
-            const fullPath = '/tmp/' + f;
-            if (!liveProfiles.has(fullPath)) {
-                fs.rmSync(fullPath, { recursive: true, force: true });
-                cleaned++;
-            }
-        }
-        if (cleaned > 0) {
-            console.log(`[渲染服务] 启动清理: 删除了 ${cleaned} 个孤儿 profile 目录`);
-        }
-    } catch (err) {
-        console.error('[渲染服务] 启动清理失败(可忽略):', err.message);
-    }
-})();
+const { startRenderProxy } = require('./render-proxy');
 
 const app = express();
 
@@ -46,6 +16,13 @@ function getArg(name, envName, defaultVal) {
 const PORT = getArg('port', 'PORT', 3000);
 const MAX_CONCURRENT_RENDERS = getArg('max-renders', 'MAX_RENDERS', 6);
 const SCREENSHOT_QUALITY = getArg('quality', 'SCREENSHOT_QUALITY', 80);
+const MAX_QUEUE = getArg('max-queue', 'MAX_QUEUE', MAX_CONCURRENT_RENDERS);
+const MAX_RENDER_MS = getArg('render-timeout', 'RENDER_TIMEOUT_MS', 45000);
+const MAX_DIMENSION = 16384;
+const MAX_PIXELS = 32000000;
+for (const [name, value, max] of [['port', PORT, 65535], ['max-renders', MAX_CONCURRENT_RENDERS, 64], ['quality', SCREENSHOT_QUALITY, 100], ['max-queue', MAX_QUEUE, 64], ['render-timeout', MAX_RENDER_MS, 120000]]) {
+    if (!Number.isSafeInteger(value) || value < 1 || value > max) throw new Error(`Invalid ${name}`);
+}
 
 function fmtSize(bytes) {
     if (bytes >= 1048576) return (bytes / 1048576).toFixed(1) + ' MB';
@@ -54,6 +31,19 @@ function fmtSize(bytes) {
 }
 
 // 中间件
+app.disable('x-powered-by');
+// Bound admission before buffering JSON, not only after each 50 MiB body is read.
+let admittedRequests = 0;
+app.use('/render', (req, res, next) => {
+    if (req.method !== 'POST') return next();
+    if (admittedRequests >= MAX_CONCURRENT_RENDERS + MAX_QUEUE) return res.status(503).json({ error: 'Render queue full' });
+    admittedRequests++;
+    let released = false;
+    const release = () => { if (!released) { released = true; admittedRequests--; } };
+    res.once('finish', release);
+    res.once('close', release);
+    next();
+});
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 app.use((err, _req, res, _next) => {
@@ -62,11 +52,11 @@ app.use((err, _req, res, _next) => {
         return res.end();
     }
     console.error('[渲染服务] 中间件异常:', err.message);
-    res.status(400).json({ error: err.message });
+    res.status(err.type === 'entity.too.large' ? 413 : 400).json({ error: 'Invalid request body' });
 });
 
 // ── 统计模块 ──
-const DATA_DIR = path.join(__dirname, 'data');
+const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 const STATS_FILE = path.join(DATA_DIR, 'stats.json');
 
 if (!fs.existsSync(DATA_DIR)) {
@@ -142,66 +132,71 @@ const BROWSER_IDLE_TTL = 3600000;
 let activeRenders = 0;
 const renderQueue = [];
 let _browserLaunching = null;
+let renderProxy = null;
+let proxyLaunching = null;
 
-async function ensureBrowser() {
-    const now = Date.now();
-
-    const needRestart =
-        !browser ||
-        browserUseCount >= MAX_BROWSER_USES ||
-        (lastUsedTime > 0 && now - lastUsedTime > BROWSER_IDLE_TTL);
-
-    if (needRestart && browser) {
-        if (activeRenders > 0) {
-            lastUsedTime = now;
-            return browser;
-        }
-
-        console.log('[渲染服务] 正在重启浏览器...');
-        try {
-            await browser.close();
-        } catch (err) {
-            console.error('[渲染服务] 关闭浏览器失败:', err.message);
-        }
-        browser = null;
-        browserUseCount = 0;
-        _browserLaunching = null;
-    }
-
-    if (!browser) {
-        if (!_browserLaunching) {
-            console.log('[渲染服务] 正在启动新浏览器实例...');
-            _browserLaunching = puppeteer.launch({
-                headless: 'new',
-                args: [
-                    '--no-sandbox',
-                    '--disable-setuid-sandbox',
-                    '--disable-dev-shm-usage',
-                    '--disable-accelerated-2d-canvas',
-                    '--no-first-run',
-                    '--no-zygote',
-                    '--disable-gpu',
-                    '--disable-backgrounding-occluded-windows',
-                    '--disable-renderer-backgrounding'
-                ]
-            });
-        }
-        browser = await _browserLaunching;
-        _browserLaunching = null;
-        console.log('[渲染服务] 浏览器启动成功');
-    }
-
-    lastUsedTime = now;
-    return browser;
+async function ensureProxy() {
+    if (!proxyLaunching) proxyLaunching = startRenderProxy().then(proxy => { renderProxy = proxy; return proxy; }).catch(error => { proxyLaunching = null; throw error; });
+    return proxyLaunching;
 }
 
-async function acquireRenderSlot() {
+async function ensureBrowser() {
+    if (_browserLaunching) return _browserLaunching;
+    const now = Date.now();
+    const expired = browserUseCount >= MAX_BROWSER_USES || now - lastUsedTime > BROWSER_IDLE_TTL;
+    lastUsedTime = now;
+    if (browser?.connected && (!expired || activeRenders > 1)) return browser;
+    _browserLaunching = (async () => {
+        const previous = browser;
+        browser = null;
+        if (previous) { try { await previous.close(); } catch {} }
+        browserUseCount = 0;
+        const proxy = await ensureProxy();
+        // No --no-sandbox fallback: failure to enable the sandbox fails closed.
+        const launched = await puppeteer.launch({
+            headless: true,
+            pipe: true,
+            protocolTimeout: MAX_RENDER_MS,
+            args: [
+                `--proxy-server=${proxy.url}`,
+                '--proxy-bypass-list=<-loopback>',
+                '--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1',
+                '--disable-quic',
+                '--force-webrtc-ip-handling-policy=disable_non_proxied_udp',
+                '--disable-dev-shm-usage',
+                '--disable-accelerated-2d-canvas',
+                '--no-first-run',
+                '--disable-gpu',
+                '--disable-backgrounding-occluded-windows',
+                '--disable-renderer-backgrounding'
+            ]
+        });
+        browser = launched;
+        console.log('[渲染服务] 浏览器启动成功');
+        return launched;
+    })().finally(() => { _browserLaunching = null; });
+    return _browserLaunching;
+}
+
+async function acquireRenderSlot(res) {
+    if (res.destroyed) throw Object.assign(new Error('Request closed'), { status: 499 });
     if (activeRenders < MAX_CONCURRENT_RENDERS) {
         activeRenders++;
         return Promise.resolve();
     }
-    return new Promise((resolve) => {
-        renderQueue.push(resolve);
+    if (renderQueue.length >= MAX_QUEUE) throw Object.assign(new Error('Render queue full'), { status: 503 });
+    return new Promise((resolve, reject) => {
+        const cancel = () => {
+            const index = renderQueue.indexOf(waiter);
+            if (index !== -1) renderQueue.splice(index, 1);
+            clearTimeout(timer);
+            res.off('close', cancel);
+            reject(Object.assign(new Error('Render queue timeout'), { status: 503 }));
+        };
+        const timer = setTimeout(cancel, 15000);
+        const waiter = () => { clearTimeout(timer); res.off('close', cancel); resolve(); };
+        res.once('close', cancel);
+        renderQueue.push(waiter);
     });
 }
 
@@ -221,22 +216,31 @@ async function acquirePage() {
     const b = await ensureBrowser();
     const ctx = await b.createBrowserContext();
     const pageId = ++_pageIdCounter;
-    const page = await ctx.newPage();
-    await page.setViewport({ width: 1200, height: 1000 });
-    page._renderContext = ctx;
-    page._pageId = pageId;
-    page._createTime = Date.now();
-    return page;
+    try {
+        const page = await ctx.newPage();
+        await page.setBypassServiceWorker(true);
+        await page.setRequestInterception(true);
+        page.on('request', request => {
+            const allowed = /^(https?:|data:|blob:|about:blank$)/i.test(request.url());
+            (allowed ? request.continue() : request.abort('blockedbyclient')).catch(() => {});
+        });
+        await page.setViewport({ width: 1200, height: 1000 });
+        page._renderContext = ctx;
+        page._pageId = pageId;
+        page._createTime = Date.now();
+        return page;
+    } catch (error) {
+        await ctx.close().catch(() => {});
+        throw error;
+    }
 }
 
 async function releasePage(page) {
+    const context = page._renderContext;
+    if (!context) return;
+    page._renderContext = null;
     browserUseCount++;
-    if (page._renderContext) {
-        try {
-            await page._renderContext.close();
-        } catch (err) {}
-        page._renderContext = null;
-    }
+    try { await context.close(); } catch {}
 }
 
 // 健康检查
@@ -269,22 +273,28 @@ app.post('/render', async (req, res) => {
     let page = null;
 
     try {
-        const { html } = req.body;
+        const { html } = req.body || {};
 
-        if (!html) {
+        if (typeof html !== 'string' || !html.trim()) {
             return res.status(400).json({ error: 'HTML content is required' });
         }
 
         const titleMatch = html.match(/<title[^>]*>([^<]*)<\/title>/i);
-        const title = titleMatch ? titleMatch[1].trim() : '';
+        const title = titleMatch ? titleMatch[1].replace(/[\x00-\x1f\x7f]/g, '').trim().slice(0, 160) : '';
         const titleTag = title ? ` [${title}]` : '';
         console.log(`[渲染服务]${titleTag} 收到渲染请求，HTML大小: ${fmtSize(html.length)}，当前并发: ${activeRenders}/${MAX_CONCURRENT_RENDERS}`);
 
-        await acquireRenderSlot();
+        await acquireRenderSlot(res);
         const renderStartTime = Date.now();
+        let deadline;
+        const closeOnDisconnect = () => { if (!res.writableEnded && page) releasePage(page).catch(() => {}); };
+        res.once('close', closeOnDisconnect);
 
         try {
+            if (res.destroyed) return;
             page = await acquirePage();
+            deadline = setTimeout(() => { if (page) releasePage(page).catch(() => {}); }, MAX_RENDER_MS);
+            if (res.destroyed) return;
 
             await page.setContent(html, {
                 waitUntil: 'load',
@@ -301,16 +311,27 @@ app.post('/render', async (req, res) => {
                 return { width, height };
             }, container);
 
-            if (size && size.width && size.height) {
+            if (!size || !Number.isFinite(size.width) || !Number.isFinite(size.height) || size.width < 1 || size.height < 1 || size.width > MAX_DIMENSION || size.height > MAX_DIMENSION || size.width * size.height > MAX_PIXELS) {
+                throw Object.assign(new Error('Render dimensions exceed limit'), { status: 413 });
+            }
+            if (size.width && size.height) {
                 await page.setViewport({
                     width: Math.max(1, size.width),
                     height: Math.max(1, size.height)
                 });
             }
 
-            const screenshot = await container.screenshot({
+            // Fix the capture rectangle after layout. Element.screenshot() would
+            // measure it again and let page JavaScript enlarge it after our check.
+            const box = await container.boundingBox();
+            if (!box || ![box.x, box.y, box.width, box.height].every(Number.isFinite) || box.width < 1 || box.height < 1 || box.width > MAX_DIMENSION || box.height > MAX_DIMENSION || Math.ceil(box.width) * Math.ceil(box.height) > MAX_PIXELS) {
+                throw Object.assign(new Error('Render dimensions exceed limit'), { status: 413 });
+            }
+            const screenshot = await page.screenshot({
                 type: 'jpeg',
-                quality: SCREENSHOT_QUALITY
+                quality: SCREENSHOT_QUALITY,
+                clip: { x: box.x, y: box.y, width: Math.ceil(box.width), height: Math.ceil(box.height) },
+                captureBeyondViewport: true
             });
 
             const duration = Date.now() - renderStartTime;
@@ -331,12 +352,14 @@ app.post('/render', async (req, res) => {
             console.log(`[渲染服务]${titleTag} 渲染成功，耗时: ${duration}ms，图片大小: ${fmtSize(outBytes)}`);
 
             res.set('Content-Type', 'image/jpeg');
-            res.send(screenshot);
+            res.send(Buffer.from(screenshot));
 
         } catch (err) {
             console.error('[渲染服务] 渲染失败:', err.message);
             throw err;
         } finally {
+            clearTimeout(deadline);
+            res.off('close', closeOnDisconnect);
             if (page) {
                 try { await releasePage(page); } catch (e) {}
                 page = null;
@@ -355,7 +378,8 @@ app.post('/render', async (req, res) => {
             }
         }
 
-        res.status(500).json({
+        if (res.destroyed || res.headersSent) return;
+        res.status(error.status || 500).json({
             error: 'Render failed',
             message: error.message
         });
@@ -382,11 +406,13 @@ setInterval(async () => {
 }, 300000);
 
 // 启动服务器
-app.listen(PORT, () => {
+const server = app.listen(PORT, process.env.HOST || '127.0.0.1', () => {
     console.log(`[渲染服务] 服务已启动，监听端口: ${PORT}，截图质量: ${SCREENSHOT_QUALITY}`);
     console.log(`[渲染服务] 健康检查: http://localhost:${PORT}/health`);
     console.log(`[渲染服务] 渲染接口: http://localhost:${PORT}/render`);
 });
+server.requestTimeout = 30000;
+server.headersTimeout = 10000;
 
 // 优雅关闭
 async function shutdown() {
@@ -403,6 +429,7 @@ async function shutdown() {
             try { browser.process()?.kill('SIGKILL'); } catch (_) {}
         }
     }
+    if (renderProxy) await renderProxy.close();
     process.exit(0);
 }
 

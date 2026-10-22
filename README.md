@@ -9,7 +9,7 @@
 - ✅ 浏览器实例自动管理
 - ✅ 智能队列管理
 - ✅ 健康检查接口
-- ✅ 渲染统计（本地 SQLite）
+- ✅ 渲染统计（本地 JSON）
 
 ## 快速开始
 
@@ -114,8 +114,7 @@ const BROWSER_IDLE_TTL = 3600000;  // 空闲超时（1小时）
 
 ## 统计数据存储
 
-统计数据保存在本地 SQLite：`RemoteRender/data/stats.db`  
-按天分表：`stats_day_YYYYMMDD`，总览表：`stats_total`
+统计数据保存在 `RemoteRender/data/stats.json`；升级时应保留此目录。
 
 **并发数建议：**
 - 1-2GB 内存：2-3
@@ -227,3 +226,27 @@ pm2 save
 ## 许可证
 
 MIT License
+
+## 安全运行与升级
+
+使用已修补的 Node.js 24.22.1（`.nvmrc`），或受支持的 22.23.4 / 26.12.1 及各自更新补丁版本。依赖版本由 `package-lock.json` 锁定。
+
+```bash
+nvm install
+nvm use
+npm ci --no-audit --no-fund
+# npm 若默认禁止依赖安装脚本，显式安装 Puppeteer 自带的 Chrome：
+node node_modules/puppeteer/install.mjs
+npm test
+node server.js --port 3001 --max-renders 12
+```
+
+服务默认仅监听 `127.0.0.1`，由反向代理提供公网入口；容器部署可显式设置 `HOST`。systemd 应使用对应版本的 Node，避免使用旧的 nvm default。
+
+Chromium 必须能启用原生沙箱；不使用 `--no-sandbox` 降级。页面的 JavaScript、内嵌图片和公网 HTTP/HTTPS 图片、字体继续可用。所有浏览器网络连接经本机受限代理：只允许公网地址的 80/443 端口，拒绝本机、私网、链路本地、云元数据及保留地址；DNS 全部解析结果验证后固定连接地址，重定向会重新经过同一检查。页面不能直接读取服务器本地文件，内网素材应改为内嵌资源。Chrome 的直连 DNS、QUIC 和非代理 WebRTC UDP 路径已关闭。
+
+请求正文上限仍为 50 MiB；在读取正文前限制在途请求总数。默认等待队列与并发数相同，排队最长 15 秒，超限返回 503；单次渲染默认上限 45 秒。截图最长边 16384 像素且总面积不超过 3200 万像素，超限返回 413。可用 `--max-queue` / `MAX_QUEUE` 设置等待数，`--render-timeout` / `RENDER_TIMEOUT_MS` 设置单次时限。浏览器代理每条连接最多传输 64 MiB，空闲超时 30 秒。
+
+`npm test` 使用独立端口和临时统计目录，验证地址与 DNS 规则、HTTP/CONNECT 拒绝、JavaScript 和图片渲染、截图尺寸及队列限制，不改写生产统计。
+
+仅供受信任本机调用的实例若需要本地字体，可设置 `RENDER_ASSET_PREFIXES` 为逗号分隔的完整 loopback HTTP 目录 URL（每项以 `/` 结尾）。仅允许这些目录的 GET/HEAD 素材请求，拒绝其他路径、路径穿越和所有私网 CONNECT；不要在公开实例上配置该选项。
