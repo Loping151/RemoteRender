@@ -3,6 +3,7 @@ const puppeteer = require('puppeteer');
 const fs = require('fs');
 const path = require('path');
 const { startRenderProxy } = require('./render-proxy');
+const { launchVerifiedBrowser } = require('./browser-security');
 
 const app = express();
 
@@ -153,7 +154,7 @@ async function ensureBrowser() {
         browserUseCount = 0;
         const proxy = await ensureProxy();
         // No --no-sandbox fallback: failure to enable the sandbox fails closed.
-        const launched = await puppeteer.launch({
+        const launched = await launchVerifiedBrowser(puppeteer, {
             headless: true,
             pipe: true,
             protocolTimeout: MAX_RENDER_MS,
@@ -170,7 +171,7 @@ async function ensureBrowser() {
                 '--disable-backgrounding-occluded-windows',
                 '--disable-renderer-backgrounding'
             ]
-        });
+        }, path.join(DATA_DIR, '.browser-profile'));
         browser = launched;
         console.log('[渲染服务] 浏览器启动成功');
         return launched;

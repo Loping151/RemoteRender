@@ -250,3 +250,5 @@ Chromium 必须能启用原生沙箱；不使用 `--no-sandbox` 降级。页面�
 `npm test` 使用独立端口和临时统计目录，验证地址与 DNS 规则、HTTP/CONNECT 拒绝、JavaScript 和图片渲染、截图尺寸及队列限制，不改写生产统计。
 
 仅供受信任本机调用的实例若需要本地字体，可设置 `RENDER_ASSET_PREFIXES` 为逗号分隔的完整 loopback HTTP 目录 URL（每项以 `/` 结尾）。仅允许这些目录的 GET/HEAD 素材请求，拒绝其他路径、路径穿越和所有私网 CONNECT；不要在公开实例上配置该选项。
+
+浏览器使用持久化的专用配置目录保存由 Chromium 验证签名的 Google CRLSet。启动后先确认撤销清单仍有效，并包含已泄露的 eMudhra TLS 中间 CA 密钥；缺失时触发 Chromium 自身的组件更新，验证通过后才接受 HTML 渲染。后台组件更新保持开启；首次启动需能连接 Google 组件更新服务。浏览器配置是必要运行数据，升级时应保留，不能当作构建缓存清理。
