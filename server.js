@@ -210,6 +210,49 @@ function releaseRenderSlot() {
     }
 }
 
+// 跨渲染复用字体与字体 CSS 响应
+const ASSET_TTL_MS = 10 * 60 * 1000;
+const ASSET_MAX_BYTES = 32 * 1024 * 1024;
+const ASSET_CACHE_BYTES = 256 * 1024 * 1024;
+const assetCache = new Map();
+let assetCacheBytes = 0;
+
+function cacheableAsset(request) {
+    return request.method() === 'GET' && /^https?:/i.test(request.url())
+        && ['font', 'stylesheet'].includes(request.resourceType());
+}
+
+function getCachedAsset(url) {
+    const hit = assetCache.get(url);
+    if (!hit) return null;
+    assetCache.delete(url);
+    if (hit.expires < Date.now()) {
+        assetCacheBytes -= hit.body.length;
+        return null;
+    }
+    assetCache.set(url, hit);
+    return hit;
+}
+
+async function storeAsset(response) {
+    const request = response.request();
+    const url = request.url();
+    if (!cacheableAsset(request) || response.status() !== 200 || assetCache.has(url)) return;
+    const body = await response.buffer().catch(() => null);
+    if (!body || body.length > ASSET_MAX_BYTES || assetCache.has(url)) return;
+    const headers = {};
+    for (const [name, value] of Object.entries(response.headers())) {
+        if (!['content-encoding', 'content-length', 'transfer-encoding', 'set-cookie'].includes(name)) headers[name] = value;
+    }
+    assetCache.set(url, { expires: Date.now() + ASSET_TTL_MS, status: 200, headers, body });
+    assetCacheBytes += body.length;
+    for (const [key, entry] of assetCache) {
+        if (assetCacheBytes <= ASSET_CACHE_BYTES) break;
+        assetCache.delete(key);
+        assetCacheBytes -= entry.body.length;
+    }
+}
+
 // 每次渲染创建独立 context，渲染完毕后关闭
 let _pageIdCounter = 0;
 
@@ -222,9 +265,15 @@ async function acquirePage() {
         await page.setBypassServiceWorker(true);
         await page.setRequestInterception(true);
         page.on('request', request => {
-            const allowed = /^(https?:|data:|blob:|about:blank$)/i.test(request.url());
-            (allowed ? request.continue() : request.abort('blockedbyclient')).catch(() => {});
+            const url = request.url();
+            if (!/^(https?:|data:|blob:|about:blank$)/i.test(url)) {
+                request.abort('blockedbyclient').catch(() => {});
+                return;
+            }
+            const hit = cacheableAsset(request) && getCachedAsset(url);
+            (hit ? request.respond(hit) : request.continue()).catch(() => {});
         });
+        page.on('response', response => { storeAsset(response).catch(() => {}); });
         await page.setViewport({ width: 1200, height: 1000 });
         page._renderContext = ctx;
         page._pageId = pageId;
@@ -234,6 +283,14 @@ async function acquirePage() {
         await ctx.close().catch(() => {});
         throw error;
     }
+}
+
+const FONT_WAIT_MS = 3000;
+async function waitFonts(page) {
+    await page.evaluate(ms => {
+        void document.body.offsetHeight;
+        return Promise.race([document.fonts.ready, new Promise(r => setTimeout(r, ms))]);
+    }, FONT_WAIT_MS).catch(() => {});
 }
 
 async function releasePage(page) {
@@ -303,6 +360,7 @@ app.post('/render', async (req, res) => {
             });
 
             await page.waitForSelector('.container', { timeout: 10000 });
+            await waitFonts(page);
 
             const container = await page.$('.container');
             const size = await page.evaluate((el) => {
